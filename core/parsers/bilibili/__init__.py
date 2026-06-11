@@ -20,6 +20,10 @@ from ..base import (
 )
 from .login import BilibiliLogin
 
+# ── hvc1 codec 标准化 / codec 配置解析 ─────────────────────────────
+from ._codec import _normalize_dash_codecs, _resolve_codec_config
+
+
 # 选择客户端
 select_client("curl_cffi")
 # 模拟浏览器，第二参数数值参考 curl_cffi 文档
@@ -44,9 +48,10 @@ class BilibiliParser(BaseParser):
         self.video_quality = getattr(
             VideoQuality, str(self.mycfg.video_quality).upper(), VideoQuality._720P
         )
+        # ── 兼容 video_codec_list（新）和 video_codecs（旧） ──────
+        codec_config = _resolve_codec_config(self.mycfg.raw_data())
         self.video_codecs = [
-            getattr(VideoCodecs, str(c).upper(), VideoCodecs.AVC)
-            for c in (self.mycfg.video_codec_list or ["AVC"])
+            getattr(VideoCodecs, str(c).upper(), VideoCodecs.AVC) for c in codec_config
         ]
         self.login = BilibiliLogin(config)
 
@@ -169,14 +174,14 @@ class BilibiliParser(BaseParser):
 
         # 视频下载 task
         async def download_video():
+            if page_info.duration > self.cfg.max_duration:
+                raise DurationLimitException
             output_path = self.cfg.cache_dir / f"{video_info.bvid}-{page_num}.mp4"
             if output_path.exists():
                 return output_path
             v_url, a_url = await self.extract_download_urls(
                 video=video, page_index=page_info.index
             )
-            if page_info.duration > self.cfg.max_duration:
-                raise DurationLimitException
             if a_url is not None:
                 return await self.downloader.download_av_and_merge(
                     v_url,
@@ -414,13 +419,20 @@ class BilibiliParser(BaseParser):
 
         # 获取下载数据
         download_url_data = await video.get_download_url(page_index=page_index)
+        # ── hvc1 → hev1 标准化 ─────────────────────────────────
+        _normalize_dash_codecs(download_url_data)
         detecter = VideoDownloadURLDataDetecter(download_url_data)
-        streams = detecter.detect_best_streams(
-            video_max_quality=self.video_quality,
-            codecs=self.video_codecs,
-            no_dolby_video=True,
-            no_hdr=True,
-        )
+        try:
+            streams = detecter.detect_best_streams(
+                video_max_quality=self.video_quality,
+                codecs=self.video_codecs,
+                no_dolby_video=True,
+                no_hdr=True,
+            )
+        except DownloadException:
+            raise
+        except Exception as e:
+            raise DownloadException(f"检测最佳视频流失败") from e
         video_stream = streams[0]
         if not isinstance(video_stream, VideoStreamDownloadURL):
             raise DownloadException("未找到可下载的视频流")
@@ -433,6 +445,3 @@ class BilibiliParser(BaseParser):
             return video_stream.url, None
         logger.debug(f"音频流质量: {audio_stream.audio_quality.name}")
         return video_stream.url, audio_stream.url
-
-
-
