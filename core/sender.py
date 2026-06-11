@@ -180,13 +180,25 @@ class MessageSender:
                         segs.append(Plain(g.alt))
 
         # 重媒体处理
+        video_summary_appended = False
+
         for cont in plan["heavy"]:
             try:
                 path: Path = await cont.get_path()
             except SizeLimitException:
+                if isinstance(cont, VideoContent):
+                    await self._append_video_fail_cover(segs, cont)
+                    if not video_summary_appended:
+                        segs.extend(self._build_text_fallback(result) or [])
+                        video_summary_appended = True
                 segs.append(Plain("此项媒体超过大小限制"))
                 continue
             except DownloadException:
+                if isinstance(cont, VideoContent):
+                    await self._append_video_fail_cover(segs, cont)
+                    if not video_summary_appended:
+                        segs.extend(self._build_text_fallback(result) or [])
+                        video_summary_appended = True
                 if self.cfg.show_download_fail_tip:
                     segs.append(Plain("此项媒体下载失败"))
                 continue
@@ -239,8 +251,24 @@ class MessageSender:
         elif result.extra.get("info"):
             lines.append(str(result.extra["info"]))
 
+        if result.display_url:
+            lines.append(result.display_url)
+
         text = "\n".join(line for line in lines if line).strip()
         return [Plain(text)] if text else []
+
+    async def _append_video_fail_cover(
+        self,
+        segs: list[BaseMessageComponent],
+        cont: VideoContent,
+    ) -> None:
+        """尝试追加视频封面图片，失败时静默忽略。"""
+        try:
+            cover_path = await cont.get_cover_path()
+            if cover_path:
+                segs.append(Image(self._to_file_uri(cover_path)))
+        except Exception:
+            pass
 
     def _resolve_groups(self, result: ParseResult) -> list[SendGroup]:
         if result.send_groups:
