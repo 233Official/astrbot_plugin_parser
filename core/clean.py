@@ -49,4 +49,6 @@ class CacheCleaner:
 
     async def stop(self):
         self.scheduler.remove_all_jobs()
+        if self.scheduler.running:
+            self.scheduler.shutdown(wait=False)
         logger.info(f"[{self.JOBNAME}] 已停止")
