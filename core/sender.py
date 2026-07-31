@@ -28,8 +28,8 @@ from .data import (
 )
 from .exception import (
     DownloadException,
-    DurationLimitException,
     DownloadLimitException,
+    DurationLimitException,
     SizeLimitException,
     ZeroSizeException,
 )
