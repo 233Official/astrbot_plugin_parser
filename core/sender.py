@@ -28,6 +28,7 @@ from .data import (
 )
 from .exception import (
     DownloadException,
+    DurationLimitException,
     DownloadLimitException,
     SizeLimitException,
     ZeroSizeException,
@@ -196,6 +197,9 @@ class MessageSender:
                 path: Path = await cont.get_path()
             except SizeLimitException:
                 segs.append(Plain("此项媒体超过大小限制"))
+                continue
+            except DurationLimitException:
+                segs.append(Plain("此项媒体超过时长限制"))
                 continue
             except DownloadException:
                 if self.cfg.show_download_fail_tip:

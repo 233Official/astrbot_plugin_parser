@@ -405,6 +405,7 @@ class BilibiliParser(BaseParser):
 
         from bilibili_api.video import (
             AudioStreamDownloadURL,
+            MP4StreamDownloadURL,
             VideoDownloadURLDataDetecter,
             VideoStreamDownloadURL,
         )
@@ -426,10 +427,36 @@ class BilibiliParser(BaseParser):
             no_dolby_video=True,
             no_hdr=True,
         )
+        dash_data = download_url_data.get("dash") or {}
         if not streams:
+            logger.debug(
+                "B站视频流检测为空：quality=%s, codecs=%s, response_keys=%s, "
+                "dash_video_count=%s, dash_audio_count=%s, durl_count=%s",
+                self.video_quality.name,
+                [codec.name for codec in self.video_codecs],
+                list(download_url_data),
+                len(dash_data.get("video") or []),
+                len(dash_data.get("audio") or []),
+                len(download_url_data.get("durl") or []),
+            )
             raise DownloadException("未找到可下载的视频流（可能是所选编码无对应流）")
         video_stream = streams[0]
+        if isinstance(video_stream, MP4StreamDownloadURL):
+            logger.debug("检测到 B 站单文件 MP4 视频流")
+            return video_stream.url, None
         if not isinstance(video_stream, VideoStreamDownloadURL):
+            logger.debug(
+                "B站视频流类型异常：quality=%s, codecs=%s, stream_types=%s, "
+                "response_keys=%s, dash_video_count=%s, dash_audio_count=%s, "
+                "durl_count=%s",
+                self.video_quality.name,
+                [codec.name for codec in self.video_codecs],
+                [type(stream).__name__ for stream in streams],
+                list(download_url_data),
+                len(dash_data.get("video") or []),
+                len(dash_data.get("audio") or []),
+                len(download_url_data.get("durl") or []),
+            )
             raise DownloadException("未找到可下载的视频流")
         logger.debug(
             f"视频流质量: {video_stream.video_quality.name}, 编码: {video_stream.video_codecs}"
