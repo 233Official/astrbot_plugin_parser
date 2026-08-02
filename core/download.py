@@ -112,10 +112,11 @@ class Downloader:
                         logger.warning(f"媒体 url: {url}, 大小为 0, 取消下载")
                         raise ZeroSizeException
                     if content_length and content_length > max_bytes:
+                        actual_size_mb = content_length / 1024 / 1024
                         logger.warning(
-                            f"媒体 url: {url} 大小 {content_length / 1024 / 1024:.2f} MB 超过 {self.max_size} MB, 取消下载"
+                            f"媒体 url: {url} 大小 {actual_size_mb:.2f} MB 超过 {self.max_size} MB, 取消下载"
                         )
-                        raise SizeLimitException
+                        raise SizeLimitException(actual_size_mb, self.max_size)
 
                     downloaded = 0
                     with self.get_progress_bar(file_name, content_length) as bar:
@@ -125,7 +126,11 @@ class Downloader:
                             ):
                                 downloaded += len(chunk)
                                 if downloaded > max_bytes:
-                                    raise SizeLimitException
+                                    actual_size_mb = downloaded / 1024 / 1024
+                                    raise SizeLimitException(
+                                        actual_size_mb,
+                                        self.max_size,
+                                    )
                                 await file.write(chunk)
                                 bar.update(len(chunk))
 

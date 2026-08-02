@@ -166,6 +166,7 @@ from core.data import (
     ImageContent,
     ParseResult,
     Platform,
+    SendGroup,
     TextContent,
     VideoContent,
 )
@@ -356,11 +357,16 @@ class TestVideoDownloadFailure:
         We patch ``VideoContent.get_path`` and ``VideoContent.get_cover_path``
         on the class so existing instances pick them up without needing
         ``slots`` workarounds.
+
+        ``Path.exists`` is also patched to return ``True`` so that the
+        ``_append_video_fail_cover`` coverage check passes for tests that
+        expect a cover ``Image`` to be appended.
         """
         # The plan heavy list contains VideoContent instances that were
         # created before patching.  patch.object on the class affects
         # all existing instances.
-        return await sender._build_segments(result, plan)
+        with patch.object(Path, "exists", return_value=True):
+            return await sender._build_segments(result, plan)
 
     # ── success path (no failure) ──────────────────────────────
 
@@ -400,12 +406,14 @@ class TestVideoDownloadFailure:
         ):
             segs = await self._run_build_segments(sender, result, plan)
 
-        # Expected: cover Image + summary Plain + fail tip Plain
-        assert len(segs) >= 2
+        # Expected: cover Image + reason Plain + summary Plain + fail tip Plain
+        assert len(segs) >= 3
         assert isinstance(segs[0], MockImage)  # cover
         assert "/fake/cover.jpg" in segs[0].file
-        assert isinstance(segs[1], MockPlain)  # summary
-        assert "链接:" in segs[1].text
+        assert isinstance(segs[1], MockPlain)  # failure reason
+        assert "视频下载失败" in segs[1].text
+        assert isinstance(segs[2], MockPlain)  # summary
+        assert "链接:" in segs[2].text
 
     @pytest.mark.asyncio
     async def test_download_exception_summary_once(self, sender, result) -> None:
@@ -478,7 +486,7 @@ class TestVideoDownloadFailure:
     async def test_show_download_fail_tip_false_still_shows_cover_and_summary(
         self, result
     ) -> None:
-        """show_download_fail_tip=False → no "失败" tip, but cover+summary persist."""
+        """show_download_fail_tip=False → no "此项媒体下载失败" tip, but cover+reason+summary persist."""
         sender = _make_sender(show_download_fail_tip=False)
         cont = _make_video_content()
         plan = _make_basic_plan(heavy=[cont])
@@ -492,11 +500,14 @@ class TestVideoDownloadFailure:
         ):
             segs = await self._run_build_segments(sender, result, plan)
 
-        # Cover + summary present
+        # Cover + reason + summary present
         assert any(isinstance(s, MockImage) for s in segs)
+        assert any(isinstance(s, MockPlain) and "视频下载失败" in s.text for s in segs)
         assert any(isinstance(s, MockPlain) and "链接:" in s.text for s in segs)
-        # No fail tip
-        assert not any(isinstance(s, MockPlain) and "下载失败" in s.text for s in segs)
+        # No fail tip (the generic "此项媒体下载失败" is controlled by show_download_fail_tip)
+        assert not any(
+            isinstance(s, MockPlain) and "此项媒体下载失败" in s.text for s in segs
+        )
 
     # ── SizeLimitException ─────────────────────────────────────
 
@@ -556,7 +567,309 @@ class TestVideoDownloadFailure:
         # Only the fail tip (if show_download_fail_tip is True)
         assert not any(isinstance(s, MockImage) for s in segs)
         assert not any(isinstance(s, MockPlain) and "链接:" in s.text for s in segs)
-        assert any(isinstance(s, MockPlain) and "下载失败" in s.text for s in segs)
+        assert any(
+            isinstance(s, MockPlain) and "此项媒体下载失败" in s.text for s in segs
+        )
+
+    # ── Failure reason text ──────────────────────────────────
+
+    @pytest.mark.asyncio
+    async def test_download_exception_shows_custom_reason(self, sender, result) -> None:
+        """DownloadException with custom message shows reason in output."""
+        cont = _make_video_content()
+        plan = _make_basic_plan(heavy=[cont])
+        with (
+            patch.object(
+                VideoContent,
+                "get_path",
+                side_effect=DownloadException("网络超时"),
+            ),
+            patch.object(
+                VideoContent,
+                "get_cover_path",
+                return_value=Path("/fake/cover.jpg"),
+            ),
+        ):
+            segs = await self._run_build_segments(sender, result, plan)
+
+        reasons = [
+            s for s in segs if isinstance(s, MockPlain) and "视频下载失败" in s.text
+        ]
+        assert len(reasons) == 1
+        assert "网络超时" in reasons[0].text
+
+    @pytest.mark.asyncio
+    async def test_size_limit_exception_shows_reason(self, sender, result) -> None:
+        """SizeLimitException shows its reason in output."""
+        cont = _make_video_content()
+        plan = _make_basic_plan(heavy=[cont])
+        with (
+            patch.object(VideoContent, "get_path", side_effect=SizeLimitException()),
+            patch.object(
+                VideoContent,
+                "get_cover_path",
+                return_value=Path("/fake/cover.jpg"),
+            ),
+        ):
+            segs = await self._run_build_segments(sender, result, plan)
+
+        reasons = [
+            s for s in segs if isinstance(s, MockPlain) and "视频超过大小限制" in s.text
+        ]
+        assert len(reasons) == 1
+        assert "媒体大小超过配置限制" in reasons[0].text
+
+    @pytest.mark.asyncio
+    async def test_size_limit_exception_shows_actual_and_limit(
+        self, sender, result
+    ) -> None:
+        """SizeLimitException with sizes shows actual media size and configured limit."""
+        cont = _make_video_content()
+        plan = _make_basic_plan(heavy=[cont])
+        with (
+            patch.object(
+                VideoContent,
+                "get_path",
+                side_effect=SizeLimitException(92.3, 90),
+            ),
+            patch.object(
+                VideoContent,
+                "get_cover_path",
+                return_value=Path("/fake/cover.jpg"),
+            ),
+        ):
+            segs = await self._run_build_segments(sender, result, plan)
+
+        reasons = [
+            s for s in segs if isinstance(s, MockPlain) and "视频超过大小限制" in s.text
+        ]
+        assert len(reasons) == 1
+        assert "92.30 MB" in reasons[0].text
+        assert "90 MB" in reasons[0].text
+
+    @pytest.mark.asyncio
+    async def test_download_exception_empty_reason_fallback(
+        self, sender, result
+    ) -> None:
+        """When exception message is empty, use generic fallback."""
+        cont = _make_video_content()
+        plan = _make_basic_plan(heavy=[cont])
+
+        # Create DownloadException without calling __init__ → message is unset, args=()
+        exc = DownloadException.__new__(DownloadException)
+        with (
+            patch.object(VideoContent, "get_path", side_effect=exc),
+            patch.object(
+                VideoContent,
+                "get_cover_path",
+                return_value=Path("/fake/cover.jpg"),
+            ),
+        ):
+            segs = await self._run_build_segments(sender, result, plan)
+
+        reasons = [
+            s for s in segs if isinstance(s, MockPlain) and "视频下载失败" in s.text
+        ]
+        assert len(reasons) == 1
+        # Falls back to "未知错误"
+        assert "未知错误" in reasons[0].text
+
+    @pytest.mark.asyncio
+    async def test_reason_before_summary(self, sender, result) -> None:
+        """Failure reason appears before the text fallback summary."""
+        cont = _make_video_content()
+        plan = _make_basic_plan(heavy=[cont])
+        with (
+            patch.object(
+                VideoContent,
+                "get_path",
+                side_effect=DownloadException("网络超时"),
+            ),
+            patch.object(
+                VideoContent,
+                "get_cover_path",
+                return_value=Path("/fake/cover.jpg"),
+            ),
+        ):
+            segs = await self._run_build_segments(sender, result, plan)
+
+        # Order: cover → reason → summary → tip
+        assert isinstance(segs[0], MockImage)  # cover
+        assert isinstance(segs[1], MockPlain)
+        assert "视频下载失败" in segs[1].text  # reason
+        assert segs[1].text.endswith("\n\n")
+        assert isinstance(segs[2], MockPlain)
+        assert "链接:" in segs[2].text  # summary
+
+    @pytest.mark.asyncio
+    async def test_show_download_fail_tip_false_still_shows_reason(
+        self, result
+    ) -> None:
+        """show_download_fail_tip=False → reason still shown, but no tip."""
+        sender = _make_sender(show_download_fail_tip=False)
+        cont = _make_video_content()
+        plan = _make_basic_plan(heavy=[cont])
+        with (
+            patch.object(
+                VideoContent,
+                "get_path",
+                side_effect=DownloadException("权限不足"),
+            ),
+            patch.object(
+                VideoContent,
+                "get_cover_path",
+                return_value=Path("/fake/cover.jpg"),
+            ),
+        ):
+            segs = await self._run_build_segments(sender, result, plan)
+
+        # Reason still present
+        assert any(isinstance(s, MockPlain) and "视频下载失败" in s.text for s in segs)
+        # Tip absent
+        assert not any(
+            isinstance(s, MockPlain) and "此项媒体下载失败" in s.text for s in segs
+        )
+
+    @pytest.mark.asyncio
+    async def test_sanitize_file_uri_in_reason(self, sender, result) -> None:
+        """file:// URI in exception message is sanitized (replaced with [file])."""
+        cont = _make_video_content()
+        plan = _make_basic_plan(heavy=[cont])
+        with (
+            patch.object(
+                VideoContent,
+                "get_path",
+                side_effect=DownloadException("下载失败 file:///tmp/video.mp4"),
+            ),
+            patch.object(
+                VideoContent,
+                "get_cover_path",
+                return_value=Path("/fake/cover.jpg"),
+            ),
+        ):
+            segs = await self._run_build_segments(sender, result, plan)
+
+        reasons = [
+            s for s in segs if isinstance(s, MockPlain) and "视频下载失败" in s.text
+        ]
+        assert len(reasons) == 1
+        assert "file://" not in reasons[0].text
+        assert "[file]" in reasons[0].text
+
+    @pytest.mark.asyncio
+    async def test_sanitize_http_url_in_reason(self, sender, result) -> None:
+        """HTTP download URL in exception message is sanitized."""
+        cont = _make_video_content()
+        plan = _make_basic_plan(heavy=[cont])
+        with (
+            patch.object(
+                VideoContent,
+                "get_path",
+                side_effect=DownloadException(
+                    "下载失败 https://example.com/video.m4s?token=secret"
+                ),
+            ),
+            patch.object(
+                VideoContent,
+                "get_cover_path",
+                return_value=Path("/fake/cover.jpg"),
+            ),
+        ):
+            segs = await self._run_build_segments(sender, result, plan)
+
+        reasons = [
+            s for s in segs if isinstance(s, MockPlain) and "视频下载失败" in s.text
+        ]
+        assert len(reasons) == 1
+        assert "https://" not in reasons[0].text
+        assert "token=secret" not in reasons[0].text
+        assert "[url]" in reasons[0].text
+
+    @pytest.mark.asyncio
+    async def test_sanitize_secret_fields_in_reason(self, sender, result) -> None:
+        """Credential-like fields in exception message are sanitized."""
+        cont = _make_video_content()
+        plan = _make_basic_plan(heavy=[cont])
+        with (
+            patch.object(
+                VideoContent,
+                "get_path",
+                side_effect=DownloadException(
+                    "鉴权失败 SESSDATA=abcdef bili_jct=123456"
+                ),
+            ),
+            patch.object(
+                VideoContent,
+                "get_cover_path",
+                return_value=Path("/fake/cover.jpg"),
+            ),
+        ):
+            segs = await self._run_build_segments(sender, result, plan)
+
+        reasons = [
+            s for s in segs if isinstance(s, MockPlain) and "视频下载失败" in s.text
+        ]
+        assert len(reasons) == 1
+        assert "abcdef" not in reasons[0].text
+        assert "123456" not in reasons[0].text
+        assert "SESSDATA=[redacted]" in reasons[0].text
+        assert "bili_jct=[redacted]" in reasons[0].text
+
+    @pytest.mark.asyncio
+    async def test_sanitize_token_variants_in_reason(self, sender, result) -> None:
+        """access_token / refresh_token fields in exception message are sanitized."""
+        cont = _make_video_content()
+        plan = _make_basic_plan(heavy=[cont])
+        with (
+            patch.object(
+                VideoContent,
+                "get_path",
+                side_effect=DownloadException(
+                    "鉴权失败 access_token=abc123 refresh_token=xyz789"
+                ),
+            ),
+            patch.object(
+                VideoContent,
+                "get_cover_path",
+                return_value=Path("/fake/cover.jpg"),
+            ),
+        ):
+            segs = await self._run_build_segments(sender, result, plan)
+
+        reasons = [
+            s for s in segs if isinstance(s, MockPlain) and "视频下载失败" in s.text
+        ]
+        assert len(reasons) == 1
+        assert "abc123" not in reasons[0].text
+        assert "xyz789" not in reasons[0].text
+        assert "access_token=[redacted]" in reasons[0].text
+        assert "refresh_token=[redacted]" in reasons[0].text
+
+    @pytest.mark.asyncio
+    async def test_sanitize_truncate_long_reason(self, sender, result) -> None:
+        """Very long exception message is truncated."""
+        long_msg = "x" * 300
+        cont = _make_video_content()
+        plan = _make_basic_plan(heavy=[cont])
+        with (
+            patch.object(
+                VideoContent, "get_path", side_effect=DownloadException(long_msg)
+            ),
+            patch.object(
+                VideoContent,
+                "get_cover_path",
+                return_value=Path("/fake/cover.jpg"),
+            ),
+        ):
+            segs = await self._run_build_segments(sender, result, plan)
+
+        reasons = [
+            s for s in segs if isinstance(s, MockPlain) and "视频下载失败" in s.text
+        ]
+        assert len(reasons) == 1
+        # Prefix "视频下载失败：" (9 chars) + truncated 197 + "..." = ~209
+        assert len(reasons[0].text) < 250
+        assert reasons[0].text.rstrip().endswith("...")
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -575,14 +888,29 @@ class TestAppendVideoFailCover:
     async def test_appends_image_when_cover_exists(self, sender) -> None:
         cont = _make_video_content(cover_path=Path("/real/cover.jpg"))
         segs: list = []
-        with patch.object(
-            VideoContent, "get_cover_path", return_value=Path("/real/cover.jpg")
+        with (
+            patch.object(
+                VideoContent, "get_cover_path", return_value=Path("/real/cover.jpg")
+            ),
+            patch.object(Path, "exists", return_value=True),
         ):
             await sender._append_video_fail_cover(segs, cont)
 
         assert len(segs) == 1
         assert isinstance(segs[0], MockImage)
         assert "cover.jpg" in segs[0].file
+
+    @pytest.mark.asyncio
+    async def test_skips_when_cover_path_not_exist(self, sender) -> None:
+        """Cover path returns a valid Path but file doesn't exist on disk → no Image appended."""
+        cont = _make_video_content(cover_path=Path("/fake/missing.jpg"))
+        segs: list = []
+        with patch.object(
+            VideoContent, "get_cover_path", return_value=Path("/fake/missing.jpg")
+        ):
+            await sender._append_video_fail_cover(segs, cont)
+
+        assert segs == []
 
     @pytest.mark.asyncio
     async def test_skips_when_cover_is_none(self, sender) -> None:
@@ -605,3 +933,139 @@ class TestAppendVideoFailCover:
             await sender._append_video_fail_cover(segs, cont)
 
         assert segs == []
+
+
+# ═══════════════════════════════════════════════════════════════════
+#  4. _send_group fallback to plain text on send failure
+# ═══════════════════════════════════════════════════════════════════
+
+
+class TestSendGroupFallback:
+    """_send_group retry: when event.send() fails, extract Plain from raw_segs and retry."""
+
+    @pytest.fixture
+    def sender(self) -> MessageSender:
+        return _make_sender()
+
+    @pytest.fixture
+    def event(self) -> MagicMock:
+        event = MagicMock()
+        event.get_self_id.return_value = "test_bot"
+        event.chain_result.side_effect = lambda x: x
+        return event
+
+    @pytest.fixture
+    def group(self) -> SendGroup:
+        return SendGroup(contents=[])
+
+    async def _run_with_segs(
+        self,
+        sender: MessageSender,
+        event: MagicMock,
+        group: SendGroup,
+        segs: list,
+        merged_segs: list | None = None,
+        plan: dict | None = None,
+    ) -> bool:
+        """Run _send_group with internals mocked."""
+        if merged_segs is None:
+            merged_segs = segs
+        if plan is None:
+            plan = _make_basic_plan()
+        with (
+            patch.object(sender, "_build_send_plan", return_value=plan),
+            patch.object(sender, "_send_preview_card", return_value=None),
+            patch.object(sender, "_build_segments", return_value=segs),
+            patch.object(sender, "_merge_segments_if_needed", return_value=merged_segs),
+        ):
+            return await sender._send_group(event, _make_result(), group)
+
+    # ── success path ────────────────────────────────────────────
+
+    @pytest.mark.asyncio
+    async def test_send_success_no_fallback(self, sender, event, group) -> None:
+        """When event.send succeeds, return True without fallback."""
+        event.send = AsyncMock(return_value=None)
+        segs = [MockPlain("hello")]
+        result = await self._run_with_segs(sender, event, group, segs)
+        assert result is True
+        event.send.assert_awaited_once()
+
+    # ── send fails → plain text retry succeeds ──────────────────
+
+    @pytest.mark.asyncio
+    async def test_send_with_image_fails_fallback_to_plain(
+        self, sender, event, group
+    ) -> None:
+        """send(Image+Plain) fails → retry with Plain only → returns True."""
+        event.send = AsyncMock(side_effect=[Exception("send failed"), None])
+        segs = [MockImage("file:///img.jpg"), MockPlain("fallback text")]
+        result = await self._run_with_segs(sender, event, group, segs)
+        assert result is True
+        assert event.send.await_count == 2
+        second_args = event.send.await_args_list[1][0][0]
+        assert len(second_args) == 1
+        assert isinstance(second_args[0], MockPlain)
+        assert second_args[0].text == "fallback text"
+
+    # ── plain text retry also fails ─────────────────────────────
+
+    @pytest.mark.asyncio
+    async def test_send_fallback_plain_also_fails(self, sender, event, group) -> None:
+        """Both send and plain text retry fail → return False."""
+        event.send = AsyncMock(side_effect=Exception("always fail"))
+        segs = [MockImage("file:///img.jpg"), MockPlain("fallback text")]
+        result = await self._run_with_segs(sender, event, group, segs)
+        assert result is False
+        assert event.send.await_count == 2
+
+    # ── no Plain in raw_segs → no retry ─────────────────────────
+
+    @pytest.mark.asyncio
+    async def test_no_plain_in_raw_segs_no_retry(self, sender, event, group) -> None:
+        """No Plain segments → return False without attempting retry."""
+        event.send = AsyncMock(side_effect=Exception("send failed"))
+        segs = [MockImage("file:///img.jpg")]
+        result = await self._run_with_segs(sender, event, group, segs)
+        assert result is False
+        event.send.assert_awaited_once()  # only the first attempt
+
+    # ── Plain extracted from raw_segs (pre-merge), not merged ───
+
+    @pytest.mark.asyncio
+    async def test_plain_from_raw_segs_not_merged(self, sender, event, group) -> None:
+        """Plain is extracted from raw_segs (pre-merge), not from merged Nodes."""
+        event.send = AsyncMock(side_effect=[Exception("send failed"), None])
+        raw = [MockImage("file:///img.jpg"), MockPlain("important text")]
+        # Merged wraps everything in Nodes — no top-level Plain
+        merged = [MockNodes([MockNode("bot", "parser", [s]) for s in raw])]
+        result = await self._run_with_segs(sender, event, group, raw, merged)
+        assert result is True
+        second_args = event.send.await_args_list[1][0][0]
+        assert len(second_args) == 1
+        assert isinstance(second_args[0], MockPlain)
+        assert second_args[0].text == "important text"
+
+    # ── empty/whitespace-only Plain excluded ────────────────────
+
+    @pytest.mark.asyncio
+    async def test_empty_plain_excluded_from_fallback(
+        self, sender, event, group
+    ) -> None:
+        """Whitespace-only Plain is excluded; non-empty Plain is used."""
+        event.send = AsyncMock(side_effect=[Exception("send failed"), None])
+        segs = [MockImage("file:///img.jpg"), MockPlain("   "), MockPlain("valid")]
+        result = await self._run_with_segs(sender, event, group, segs)
+        assert result is True
+        second_args = event.send.await_args_list[1][0][0]
+        assert len(second_args) == 1
+        assert second_args[0].text == "valid"
+
+    @pytest.mark.asyncio
+    async def test_all_plain_empty_no_retry(self, sender, event, group) -> None:
+        """Only whitespace-only Plain segments → no retry, return False."""
+        event.send = AsyncMock(side_effect=Exception("send failed"))
+        segs = [MockImage("file:///img.jpg"), MockPlain("")]
+        result = await self._run_with_segs(sender, event, group, segs)
+        assert result is False
+        event.send.assert_awaited_once()

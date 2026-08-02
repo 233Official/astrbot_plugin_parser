@@ -1,3 +1,4 @@
+import re
 from itertools import chain
 from pathlib import Path
 
@@ -58,6 +59,36 @@ class MessageSender:
         if not path.is_absolute():
             path = path.resolve()
         return path.as_uri()
+
+    @staticmethod
+    def _sanitize_reason(reason: str) -> str:
+        """清理用户可见的失败原因，避免泄露本地路径、下载直链或凭证片段。"""
+        reason = re.sub(r"file://[^\s]*", "[file]", reason)
+        reason = re.sub(r"(?i)\b(?:https?|ftp)://[^\s]+", "[url]", reason)
+        reason = re.sub(
+            r"(?i)\b(cookie|token|access_token|refresh_token|secret|authorization|sessdata|bili_jct|ac_time_value)\s*[:=]\s*[^\s,;]+",
+            r"\1=[redacted]",
+            reason,
+        )
+        if len(reason) > 200:
+            reason = reason[:197] + "..."
+        return reason
+
+    @staticmethod
+    def _extract_fail_reason(e: Exception) -> str:
+        """从异常中提取可展示给用户的失败原因。"""
+        raw = getattr(e, "message", "") or str(e) or ""
+        if not raw:
+            raw = "未知错误"
+
+        sanitized = MessageSender._sanitize_reason(raw)
+
+        if isinstance(e, SizeLimitException):
+            return f"视频超过大小限制：{sanitized}"
+        elif isinstance(e, DownloadException):
+            return f"视频下载失败：{sanitized}"
+        else:
+            return f"媒体处理失败：{sanitized}"
 
     @staticmethod
     def _iter_contents(result: ParseResult):
@@ -185,18 +216,20 @@ class MessageSender:
         for cont in plan["heavy"]:
             try:
                 path: Path = await cont.get_path()
-            except SizeLimitException:
+            except SizeLimitException as e:
                 if isinstance(cont, VideoContent):
                     await self._append_video_fail_cover(segs, cont)
                     if not video_summary_appended:
+                        segs.append(Plain(self._extract_fail_reason(e) + "\n\n"))
                         segs.extend(self._build_text_fallback(result) or [])
                         video_summary_appended = True
                 segs.append(Plain("此项媒体超过大小限制"))
                 continue
-            except DownloadException:
+            except DownloadException as e:
                 if isinstance(cont, VideoContent):
                     await self._append_video_fail_cover(segs, cont)
                     if not video_summary_appended:
+                        segs.append(Plain(self._extract_fail_reason(e) + "\n\n"))
                         segs.extend(self._build_text_fallback(result) or [])
                         video_summary_appended = True
                 if self.cfg.show_download_fail_tip:
@@ -265,7 +298,7 @@ class MessageSender:
         """尝试追加视频封面图片，失败时静默忽略。"""
         try:
             cover_path = await cont.get_cover_path()
-            if cover_path:
+            if cover_path and Path(cover_path).exists():
                 segs.append(Image(self._to_file_uri(cover_path)))
         except Exception:
             pass
@@ -291,6 +324,7 @@ class MessageSender:
         await self._send_preview_card(event, result, plan)
 
         segs = await self._build_segments(result, plan)
+        raw_segs = list(segs)
         segs = self._merge_segments_if_needed(event, segs, plan["force_merge"])
 
         if not segs:
@@ -302,7 +336,22 @@ class MessageSender:
         except Exception as e:
             seg_meta = self._collect_seg_meta(segs)
             logger.error(f"发送解析结果失败： error={e}, segments={seg_meta}")
-            return False
+
+            plain_segs = [
+                s
+                for s in raw_segs
+                if isinstance(s, Plain) and s.text and s.text.strip()
+            ]
+            if not plain_segs:
+                return False
+            try:
+                await event.send(event.chain_result(plain_segs))
+                return True
+            except Exception as e2:
+                logger.error(
+                    f"纯文本重发失败： error={e2}, segments={self._collect_seg_meta(plain_segs)}"
+                )
+                return False
 
     @staticmethod
     def _collect_seg_meta(segs: list[BaseMessageComponent]) -> list[dict[str, str]]:

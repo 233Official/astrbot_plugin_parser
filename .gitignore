@@ -1,2 +1,6 @@
 __pycache__/
 core/test/
+.pytest_cache/
+dist/
+*.pyc
+*.pyo

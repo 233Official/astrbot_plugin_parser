@@ -28,8 +28,21 @@ class DownloadLimitException(DownloadException):
 class SizeLimitException(DownloadLimitException):
     """下载大小超过限制异常"""
 
-    def __init__(self):
-        super().__init__("媒体大小超过配置限制，取消下载")
+    def __init__(
+        self,
+        actual_size_mb: float | None = None,
+        max_size_mb: float | None = None,
+    ):
+        if actual_size_mb is not None and max_size_mb is not None:
+            message = (
+                f"媒体大小 {actual_size_mb:.2f} MB 超过配置限制 "
+                f"{max_size_mb:g} MB，取消下载"
+            )
+        elif max_size_mb is not None:
+            message = f"媒体大小超过配置限制 {max_size_mb:g} MB，取消下载"
+        else:
+            message = "媒体大小超过配置限制，取消下载"
+        super().__init__(message)
 
 
 class DurationLimitException(DownloadLimitException):
