@@ -185,12 +185,20 @@ def _make_sender(
     forward_threshold: int = 999,
     audio_to_file: bool = False,
 ) -> MessageSender:
-    """Create a MessageSender with a lightweight mock config/renderer."""
+    """Create a MessageSender with a lightweight mock config/renderer.
+
+    The mock config carries the media-send fields so the new
+    MediaUriResolver resolves in local mode (default behavior).
+    """
     cfg = MagicMock()
     cfg.show_download_fail_tip = show_download_fail_tip
     cfg.single_heavy_render_card = single_heavy_render_card
     cfg.forward_threshold = forward_threshold
     cfg.audio_to_file = audio_to_file
+    cfg.media_send_mode = "local"
+    cfg.media_http_base_url = None
+    cfg.media_http_ttl = 3600
+    cfg.cache_dir = Path("/tmp/astrbot_parser_test_cache")
     renderer = MagicMock()
     return MessageSender(cfg, renderer)
 

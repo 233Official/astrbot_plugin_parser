@@ -112,6 +112,33 @@
         },
         "default": 15
     },
+    "media_send_mode": {
+        "description": "媒体发送模式",
+        "hint": "local: 使用 file:// 本地路径发送（默认，行为不变）；http: 为缓存文件生成临时 HTTP(S) URL 后发送，适用于 NapCat 等与插件不在同一主机、无法访问插件本机路径的部署。切换为 http 后必须同时配置 media_http_base_url 和 media_http_ttl，并自行部署指向插件 cache 目录的外部静态服务",
+        "type": "string",
+        "options": [
+            "local",
+            "http"
+        ],
+        "default": "local"
+    },
+    "media_http_base_url": {
+        "description": "媒体 HTTP 基础地址",
+        "hint": "HTTP 模式下必填。外部静态服务（如 Caddy/Nginx）指向插件 cache 目录后，填入其对外的可访问基础地址，例如 https://media.example.com/astrbot 或 http://127.0.0.1:8080/astrbot。仅允许 http/https 且必须包含主机名；请勿携带查询参数。插件会按 cache 目录下的相对路径拼接 URL 并逐段做 URL 编码",
+        "type": "string",
+        "default": ""
+    },
+    "media_http_ttl": {
+        "description": "媒体 HTTP 文件保留时间（秒）",
+        "hint": "HTTP 模式下缓存文件至少保留的秒数，过期后由缓存清理任务按文件修改时间删除，避免外部服务取不到文件。建议与外部服务/CDN 的缓存时长保持一致。留 0 或非法值将回退为默认值 3600",
+        "type": "int",
+        "slider": {
+            "min": 60,
+            "max": 604800,
+            "step": 60
+        },
+        "default": 3600
+    },
     "proxy": {
         "description": "代理地址",
         "hint": "如 http://127.0.0.1:7890, 留空则直连。配置代理地址后, 请在各个解析器中再配置是否使用代理",
