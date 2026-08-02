@@ -405,6 +405,7 @@ class BilibiliParser(BaseParser):
 
         from bilibili_api.video import (
             AudioStreamDownloadURL,
+            MP4StreamDownloadURL,
             VideoDownloadURLDataDetecter,
             VideoStreamDownloadURL,
         )
@@ -426,9 +427,12 @@ class BilibiliParser(BaseParser):
             no_dolby_video=True,
             no_hdr=True,
         )
+        dash_data = download_url_data.get("dash") or {}
         if not streams:
             raise DownloadException("未找到可下载的视频流（可能是所选编码无对应流）")
         video_stream = streams[0]
+        if isinstance(video_stream, MP4StreamDownloadURL):
+            return video_stream.url, None
         if not isinstance(video_stream, VideoStreamDownloadURL):
             raise DownloadException("未找到可下载的视频流")
         logger.debug(
