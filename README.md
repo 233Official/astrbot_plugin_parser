@@ -64,6 +64,109 @@ _✨ 链接解析器 ✨_
 
 请在astrbot的插件配置面板查看并修改
 
+---
+
+## 🌐 跨主机临时 HTTP 媒体发送模式
+
+默认情况下（`media_send_mode = local`），插件把下载的媒体以 `file://` 本地路径
+发送，适用于 NapCat 等与插件运行在**同一主机**的部署。
+
+当 NapCat 与插件**不在同一主机**、无法访问插件本机路径时，可切换为
+`http` 模式：插件为缓存文件生成指向外部静态服务的临时 HTTP(S) URL 再发送。
+**注意：必须自行部署外部静态服务指向插件的 cache 目录，否则媒体将无法被
+NapCat 下载。**
+
+### 配置项
+
+| 配置项 | 类型 | 默认值 | 说明 |
+| --- | --- | --- | --- |
+| `media_send_mode` | string | `local` | `local`：`file://` 本地路径发送（默认，行为不变）；`http`：临时 HTTP(S) URL 发送 |
+| `media_http_base_url` | string | 空 | HTTP 模式下必填。外部服务对外的基础地址，如 `https://media.example.com/astrbot`。仅允许 http/https 且必须包含主机名，请勿携带查询参数 |
+| `media_http_ttl` | int | `3600` | HTTP 模式下缓存文件至少保留的秒数，过期后由清理任务按修改时间删除。建议与外部服务/CDN 缓存时长一致；留 0 或非法值回退默认值 |
+
+插件按 `base_url + 相对 cache 目录路径` 拼接媒体 URL，每个路径段都会做
+URL 编码（空格、中文等字符可正确发送），且只允许访问 cache 目录内的文件。
+
+### 部署建议：主 Caddy + 独立只读静态容器
+
+插件**只负责 URL 映射与 TTL 清理**，不负责 TLS、IP 访问控制或静态文件服务
+本身。推荐采用「主 Caddy 负责入口与 TLS，独立 `nginx-unprivileged` 只读
+静态容器负责挂载并对外提供 cache 目录」的分工：
+
+- 主 Caddy：作为反向代理 / TLS 入口，只做请求转发与证书终止，**不直接挂载
+  cache 目录**。
+- 独立静态容器：使用 `nginx-unprivileged` 镜像，以**只读**方式挂载插件的
+  cache 目录，仅暴露在受控网络（内网 / IP ACL）中，供主 Caddy 转发。
+
+下面是一个示意性的 `docker-compose.yml`（请按实际部署路径与域名调整）：
+
+```yaml
+services:
+  caddy:
+    image: caddy:2
+    ports:
+      - "443:443"
+      - "80:80"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+    depends_on:
+      - media-static
+
+  media-static:
+    # 生产环境请进一步固定到已审核的版本与镜像 digest
+    image: nginxinc/nginx-unprivileged:stable-alpine
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    # 只读挂载插件 cache 目录，容器内以 root 之外的用户运行
+    volumes:
+      - /path/to/astrbot/data/plugin_data/astrbot_plugin_parser/cache:/usr/share/nginx/html:ro
+    # 仅内网可达；由主 Caddy 转发，不直接暴露公网
+```
+
+主 Caddy 的 `Caddyfile` 示意：
+
+```caddy
+media.example.com {
+    @napcat remote_ip 203.0.113.10/32
+    handle @napcat {
+        reverse_proxy media-static:8080
+    }
+    respond "Forbidden" 403
+}
+```
+
+对应插件配置：
+
+```json
+{
+    "media_send_mode": "http",
+    "media_http_base_url": "https://media.example.com"
+}
+```
+
+> 若静态容器的根目录直接指向 cache 目录，`media_http_base_url` 无需带子路径；
+> 插件会自动在 base URL 后拼接 cache 内的相对路径。若静态服务挂在子路径下
+> （如 `/astrbot`），则按实际子路径填写 base URL。
+
+### 使用说明与注意事项
+
+- 切换为 `http` 前，请确认 NapCat 所在主机可以访问上述 URL（含端口/防火墙），
+  否则远端无法拉取媒体。
+- TLS、IP 访问控制（ACL）与静态服务本身由部署方负责，插件不参与；
+  建议将静态容器限制在内网，并由主 Caddy 统一管理证书与访问策略。
+- 部分缓存文件名可能由来源 ID 等信息派生，不能依赖“文件名不可猜测”作为安全
+  边界；应由主 Caddy 配置 IP ACL，并可在 base URL 中增加随机路径前缀。
+- 仍应按 `media_http_ttl` 定期清理过期文件（插件自带的清理任务在 http 模式下
+  即按 TTL 清理）。
+- 当 HTTP 配置缺失、非法或映射失败时，插件**不会**退回 `file://` 发送：
+  轻媒体将被跳过，重媒体（视频等）会输出明确失败提示。
+- 默认 `local` 模式行为完全不变，未配置新字段的旧配置亦可正常加载。
+
+---
+
 ## 🎉 指令
 
 |   指令   |         权限          |        说明        |

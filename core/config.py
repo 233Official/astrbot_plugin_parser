@@ -149,6 +149,12 @@ class ConfigNodeContainer:
 
 # ================ 插件自定义配置 ==================
 
+# 媒体发送模式取值
+MODE_LOCAL = "local"
+MODE_HTTP = "http"
+# HTTP 模式下媒体文件的最小保留时长（秒），默认 1 小时
+DEFAULT_MEDIA_HTTP_TTL = 3600
+
 
 class ParserItem(ConfigNode):
     __template_key: str
@@ -217,6 +223,10 @@ class PluginConfig(ConfigNode):
 
     proxy: str | None
 
+    media_send_mode: str
+    media_http_base_url: str | None
+    media_http_ttl: int
+
     clean_cron: str
 
     parsers_template: list[dict[str, Any]]
@@ -236,6 +246,34 @@ class PluginConfig(ConfigNode):
         self.proxy = self.proxy or None
         self.max_duration = self.source_max_minute * 60
         self.max_size = self.source_max_size * 1024 * 1024
+
+        # ---------- 媒体发送模式（local / http） ----------
+        # 旧配置缺失字段时 __getattr__ 返回 None，这里统一规范化并验证。
+        raw_mode = self.media_send_mode
+        mode = (raw_mode or "local").strip().lower()
+        if mode not in (MODE_LOCAL, MODE_HTTP):
+            logger.warning(
+                f"[config] media_send_mode 非法值 {raw_mode!r}，已回退为 {MODE_LOCAL!r}"
+            )
+            mode = MODE_LOCAL
+        self.media_send_mode = mode
+
+        # base URL：空值统一为 None，非法值由 MediaUriResolver 校验
+        base = self.media_http_base_url
+        self.media_http_base_url = (base or "").strip() or None
+
+        # TTL：必须为正整数秒；无效时回退合理默认值并告警
+        try:
+            ttl = int(self.media_http_ttl)
+        except (TypeError, ValueError):
+            ttl = 0
+        if ttl <= 0:
+            logger.warning(
+                f"[config] media_http_ttl 无效值 {self.media_http_ttl!r}，"
+                f"已回退为默认值 {DEFAULT_MEDIA_HTTP_TTL}"
+            )
+            ttl = DEFAULT_MEDIA_HTTP_TTL
+        self.media_http_ttl = ttl
 
         tz = context.get_config().get("timezone")
         self.timezone = (

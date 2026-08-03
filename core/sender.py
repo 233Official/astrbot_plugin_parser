@@ -14,7 +14,7 @@ from astrbot.core.message.components import (
 )
 from astrbot.core.platform.astr_message_event import AstrMessageEvent
 
-from .config import PluginConfig
+from .config import MODE_HTTP, PluginConfig
 from .data import (
     AudioContent,
     DynamicContent,
@@ -33,6 +33,7 @@ from .exception import (
     SizeLimitException,
     ZeroSizeException,
 )
+from .media import MediaUriError, MediaUriResolver
 from .render import Renderer
 
 
@@ -54,22 +55,32 @@ class MessageSender:
     def __init__(self, config: PluginConfig, renderer: Renderer):
         self.cfg = config
         self.renderer = renderer
+        self.media_uri = MediaUriResolver(config)
 
-    def _to_file_uri(self, path: Path) -> str:
-        if not path.is_absolute():
-            path = path.resolve()
-        return path.as_uri()
+    def _resolve_media(self, path: Path) -> str:
+        """把本地媒体路径解析为发送 URI（local 为 file://，http 为临时 URL）。
 
-    @staticmethod
-    def _image_from_path(path: Path) -> Image:
+        Raises:
+            MediaUriError: 配置缺失/非法或路径越界。
+        """
+        return self.media_uri.resolve(path)
+
+    def _image_from_path(self, path: Path) -> Image:
+        """构造图片组件：local 模式沿用 fromFileSystem，http 模式使用解析后的 URL。"""
+        if self.media_uri.mode == MODE_HTTP:
+            return Image(file=self._resolve_media(path))
         return Image.fromFileSystem(str(path))
 
-    @staticmethod
-    def _video_from_path(path: Path) -> Video:
+    def _video_from_path(self, path: Path) -> Video:
+        """构造视频组件：local 模式沿用 fromFileSystem，http 模式使用解析后的 URL。"""
+        if self.media_uri.mode == MODE_HTTP:
+            return Video(file=self._resolve_media(path))
         return Video.fromFileSystem(str(path))
 
-    @staticmethod
-    def _record_from_path(path: Path) -> Record:
+    def _record_from_path(self, path: Path) -> Record:
+        """构造语音组件：local 模式沿用 fromFileSystem，http 模式使用解析后的 URL。"""
+        if self.media_uri.mode == MODE_HTTP:
+            return Record(file=self._resolve_media(path))
         return Record.fromFileSystem(str(path))
 
     @staticmethod
@@ -143,7 +154,12 @@ class MessageSender:
             return
 
         if image_path := await self.renderer.render_card(result):
-            await event.send(event.chain_result([self._image_from_path(image_path)]))
+            try:
+                await event.send(
+                    event.chain_result([self._image_from_path(image_path)])
+                )
+            except MediaUriError as e:
+                logger.error(f"预览卡片 URI 解析失败，跳过预览: {e}")
 
     async def _build_segments(
         self,
@@ -162,7 +178,10 @@ class MessageSender:
         # 合并转发时，卡片以内联形式作为一个消息段参与合并
         if plan["render_card"] and plan["force_merge"]:
             if image_path := await self.renderer.render_card(result):
-                segs.append(self._image_from_path(image_path))
+                try:
+                    segs.append(self._image_from_path(image_path))
+                except MediaUriError as e:
+                    logger.error(f"卡片 URI 解析失败，跳过卡片: {e}")
 
         # 轻媒体处理
         for cont in plan["light"]:
@@ -173,28 +192,46 @@ class MessageSender:
 
             try:
                 path: Path = await cont.get_path()
+
+                match cont:
+                    case ImageContent():
+                        segs.append(self._image_from_path(path))
+                    case GraphicsContent() as g:
+                        segs.append(self._image_from_path(path))
+                        # GraphicsContent 允许携带补充文本
+                        if g.text:
+                            segs.append(Plain(g.text))
+                        if g.alt:
+                            segs.append(Plain(g.alt))
             except (DownloadLimitException, ZeroSizeException):
                 continue
             except DownloadException:
                 if self.cfg.show_download_fail_tip:
                     segs.append(Plain("此项媒体下载失败"))
                 continue
-
-            match cont:
-                case ImageContent():
-                    segs.append(self._image_from_path(path))
-                case GraphicsContent() as g:
-                    segs.append(self._image_from_path(path))
-                    # GraphicsContent 允许携带补充文本
-                    if g.text:
-                        segs.append(Plain(g.text))
-                    if g.alt:
-                        segs.append(Plain(g.alt))
+            except MediaUriError as e:
+                # 轻媒体：跳过失败媒体，保留其他内容
+                logger.error(f"[sender] 轻媒体 URI 解析失败，已跳过: {e}")
+                continue
 
         # 重媒体处理
         for cont in plan["heavy"]:
             try:
                 path: Path = await cont.get_path()
+
+                match cont:
+                    case VideoContent() | DynamicContent():
+                        segs.append(self._video_from_path(path))
+                    case AudioContent():
+                        segs.append(
+                            File(name=path.name, file=self._resolve_media(path))
+                            if self.cfg.audio_to_file
+                            else self._record_from_path(path)
+                        )
+                    case FileContent():
+                        segs.append(
+                            File(name=path.name, file=self._resolve_media(path))
+                        )
             except SizeLimitException:
                 segs.append(Plain("此项媒体超过大小限制"))
                 continue
@@ -205,18 +242,13 @@ class MessageSender:
                 if self.cfg.show_download_fail_tip:
                     segs.append(Plain("此项媒体下载失败"))
                 continue
-
-            match cont:
-                case VideoContent() | DynamicContent():
-                    segs.append(self._video_from_path(path))
-                case AudioContent():
-                    segs.append(
-                        File(name=path.name, file=self._to_file_uri(path))
-                        if self.cfg.audio_to_file
-                        else self._record_from_path(path)
-                    )
-                case FileContent():
-                    segs.append(File(name=path.name, file=self._to_file_uri(path)))
+            except MediaUriError as e:
+                # HTTP 模式 URI 映射失败：不得回退 file:// 发给远端，
+                # 输出明确失败提示，且仅当开启失败提示时追加。
+                logger.error(f"[sender] 重媒体 URI 解析失败，已跳过: {e}")
+                if self.cfg.show_download_fail_tip:
+                    segs.append(Plain("此项媒体发送失败"))
+                continue
 
         return segs
 
