@@ -20,11 +20,13 @@ from ..base import (
 )
 from .login import BilibiliLogin
 
-# 选择客户端
-select_client("curl_cffi")
-# 模拟浏览器，第二参数数值参考 curl_cffi 文档
-# https://curl-cffi.readthedocs.io/en/latest/impersonate.html
-request_settings.set("impersonate", "chrome131")
+try:
+    select_client("curl_cffi")
+    request_settings.set("impersonate", "chrome131")
+except Exception as e:
+    raise ModuleNotFoundError(
+        f"curl_cffi is required by bilibili parser but not installed: {e}"
+    ) from e
 
 
 class BilibiliParser(BaseParser):
