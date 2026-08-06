@@ -7,7 +7,7 @@ from astrbot.api import logger
 from astrbot.api.event import filter
 from astrbot.api.star import Context, Star
 from astrbot.core import AstrBotConfig
-from astrbot.core.message.components import At, Image, Json
+from astrbot.core.message.components import At, Image, Json, Plain, Reply
 from astrbot.core.platform.astr_message_event import AstrMessageEvent
 from astrbot.core.platform.sources.aiocqhttp.aiocqhttp_message_event import (
     AiocqhttpMessageEvent,
@@ -131,18 +131,24 @@ class ParserPlugin(Star):
         seg1 = chain[0]
         text = event.message_str
 
+        # 指定机制：专门@其他bot的消息不解析
+        self_id = event.get_self_id()
+        if isinstance(seg1, At) and str(seg1.qq) != self_id:
+            return
+
         # 卡片解析：解析Json组件，提取URL
         if isinstance(seg1, Json):
             text = extract_json_url(seg1.data)
             logger.debug(f"解析Json组件: {text}")
 
+        # 引用解析
+        reply_seg = next((seg for seg in chain if isinstance(seg, Reply)), None)
+        if reply_seg and reply_seg.chain:
+            for seg in reply_seg.chain:
+                if isinstance(seg, Plain):
+                    text = seg.text
+
         if not text:
-            return
-
-        self_id = event.get_self_id()
-
-        # 指定机制：专门@其他bot的消息不解析
-        if isinstance(seg1, At) and str(seg1.qq) != self_id:
             return
 
         # 核心匹配逻辑 ：关键词 + 正则双重判定，汇集了所有解析器的正则对。
