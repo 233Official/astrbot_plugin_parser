@@ -144,9 +144,14 @@ class ParserPlugin(Star):
         # 引用解析
         reply_seg = next((seg for seg in chain if isinstance(seg, Reply)), None)
         if reply_seg and reply_seg.chain:
+            reply_texts = []
             for seg in reply_seg.chain:
                 if isinstance(seg, Plain):
-                    text = seg.text
+                    reply_texts.append(seg.text)
+                elif isinstance(seg, Json):
+                    reply_texts.append(extract_json_url(seg.data))
+            if reply_texts:
+                text = "".join(reply_texts)
 
         if not text:
             return
