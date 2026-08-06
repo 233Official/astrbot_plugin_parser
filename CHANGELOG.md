@@ -1,5 +1,17 @@
 # 更新日志
 
+## v1.5.5
+
+### 新增
+
+- 新增`引用解析`功能，可通过引用消息中的链接来触发解析
+
+### 修复
+
+- 当未安装 `curl_cffi` 时，为 Bilibili 解析器的初始化添加保护，并给出明确的错误提示。
+- 当来源提供字符串或浮点数值时，将 Bilibili 的 dynamic 和 opus 发表时间戳字段规范化为整数。
+- 修复缓存路径，将配置中路径的获取从 get_astrbot_data_path 更正为 get_astrbot_plugin_data_path。
+
 ## v1.5.4
 
 - 新增 pixiv 解析器
