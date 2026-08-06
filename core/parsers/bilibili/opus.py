@@ -123,7 +123,10 @@ class OpusItem(Struct):
         """获取发布时间戳"""
         for module in self.item.modules:
             if module.module_type == "MODULE_TYPE_AUTHOR" and module.module_author:
-                return int(float(module.module_author.pub_ts))
+                try:
+                    return int(float(module.module_author.pub_ts))
+                except (ValueError, TypeError):
+                    return None
         return None
 
     def gen_text_img(self) -> Generator[TextNode | ImageNode, None, None]:
